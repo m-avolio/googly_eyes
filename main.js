@@ -2,8 +2,8 @@
 var canvas = document.getElementById('glcanvas');
 
 // Set width and height
-canvas.width = 1500;
-canvas.height = 1000;
+canvas.width = 3000;
+canvas.height = 2000;
 
 // Initialize WebGL context
 var gl = canvas.getContext('webgl2');

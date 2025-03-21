@@ -19,7 +19,7 @@ uniform sampler2D u_lightTexture;  // Light source texture
 #define EPSILON 1e-6
 
 // Number of samples for the diffuse "Lambertian" portion
-#define SAMPLES 256
+#define SAMPLES 32
 
 // ============================================================================
 // STRUCTS
@@ -46,17 +46,28 @@ struct Intersection {
 // ============================================================================
 // RANDOM FUNCTIONS
 // ============================================================================
-float random(vec2 st) {
-    // A simple 2D→float hash
-    return fract(sin(dot(st.xy, vec2(12.9898,78.233))) * 43758.5453123);
+// float random(vec2 st) {
+//     // A simple 2D→float hash
+//     return fract(sin(dot(st.xy, vec2(12.9898,78.233))) * 43758.5453123);
+// }
+float hash12(vec2 p) {
+    // "Hash without sine" by Inigo Quilez
+    vec3 p3 = fract(vec3(p.x, p.y, p.x) * 0.1031);
+    p3 += dot(p3, p3.yzx + 31.32);
+    return fract((p3.x + p3.y) * p3.z);
 }
 
-// ============================================================================
-// NOISE (for normal perturb if desired)
-// ============================================================================
+float random(vec2 st) {
+    return hash12(st);
+}
+
 float random3(vec3 c) {
     return fract(sin(dot(c, vec3(12.9898, 78.233, 37.425))) * 43758.5453123);
 }
+// ============================================================================
+// NOISE (for normal perturb if desired)
+// ============================================================================
+
 float fade(float t) {
     return t*t*t*(t*(t*6.0-15.0)+10.0);
 }
@@ -221,7 +232,37 @@ Intersection intersectPupil(vec3 ro, vec3 rd, vec2 xz, float R, float h) {
 // ============================================================================
 // LIGHT SAMPLING
 // ============================================================================
-vec3 sampleLight(Light light, vec3 lightIntersection, float LOD, float gamma) {
+
+
+vec3 sampleLight(Light light, Intersection hit, vec3 sampleDir, float tLight, vec3 lightColor) {
+    vec3 lightIntersection = hit.point + tLight*sampleDir;
+    // For a rectangular area light in plane (light.normal, light.position)
+    vec3 zBasis = light.normal;
+    vec3 xBasis = normalize(cross(vec3(0.0,1.0,0.0), zBasis));
+    if(length(xBasis) < EPSILON) {
+        xBasis = vec3(1.0, 0.0, 0.0);
+    }
+    vec3 yBasis = cross(zBasis, xBasis);
+
+    float halfW = 0.5 * light.size.x;
+    float halfH = 0.5 * light.size.y;
+
+    vec3  v      = (lightIntersection - light.position);
+    float localX = dot(v, normalize(xBasis));
+    float localY = dot(v, normalize(yBasis));
+
+    if(abs(localX) <= halfW && abs(localY) <= halfH) {
+        float distance = length(lightIntersection - hit.point) / 1000.0;
+        float attenuation = 1.0 / (distance * distance);
+        float NdotL = max(dot(hit.normal, sampleDir), 0.0);
+        
+        return lightColor * attenuation * NdotL;
+    }
+    return vec3(0.0);
+}
+
+vec3 sampleTextureLight(Light light, Intersection hit, vec3 sampleDir, float tLight, float LOD, float gamma) {
+    vec3 lightIntersection = hit.point + tLight*sampleDir;
     // For a rectangular area light in plane (light.normal, light.position)
     vec3 zBasis = light.normal;
     vec3 xBasis = normalize(cross(vec3(0.0,1.0,0.0), zBasis));
@@ -248,7 +289,10 @@ vec3 sampleLight(Light light, vec3 lightIntersection, float LOD, float gamma) {
         float lum = dot(texColor, vec3(0.299, 0.587, 0.114));
         float corrected = pow(lum, 1.0/gamma);
         float ratio = (lum>0.0) ? (corrected/lum) : 1.0;
-        return texColor * ratio;
+        float distance = length(lightIntersection - hit.point) / 1000.0;
+        float attenuation = 1.0 / (distance * distance);
+        float NdotL = max(dot(hit.normal, sampleDir), 0.0);
+        return texColor * ratio * attenuation * NdotL;
     }
     return vec3(0.0);
 }
@@ -314,20 +358,21 @@ void main() {
     Intersection pupil  = intersectPupil(camera.position, rayWorld, vec2(0.0), pupilRadius, cylinderHeight);
     Intersection sclera = intersectSclera(camera.position, rayWorld, scleraRadius);
 
-    vec3 intersectionWorld;
-    vec3 hitNormal;
+    Intersection hit;
     vec3 baseColor;
 
     if(pupil.hit) {
-        intersectionWorld = pupil.point;
-        hitNormal         = pupil.normal;
-        baseColor         = vec3(0.0, 0.0, 0.0); // black pupil
+        // intersectionWorld = pupil.point;
+        // hitNormal         = pupil.normal;
+        hit = pupil;
+        baseColor         = vec3(0.05f); // black pupil
     } else if(sclera.hit) {
-        intersectionWorld = sclera.point;
-        hitNormal         = sclera.normal;
+        // intersectionWorld = sclera.point;
+        // hitNormal         = sclera.normal;
+        hit = sclera;
         // optional normal perturb
-        hitNormal         = perturb_normal(hitNormal, intersectionWorld, 0.1, 0.2);
-        baseColor         = vec3(0.9, 0.9, 0.9); // white sclera
+        hit.normal = perturb_normal(hit.normal, hit.point, 0.05, 0.05);
+        baseColor = vec3(0.9f); // white sclera
     } else {
         // Missed both
         fragColor = vec4(0.5, 0.5, 0.5, 1.0);
@@ -342,12 +387,11 @@ void main() {
         vec2 randSeed = gl_FragCoord.xy + float(i)*0.1234;
         float r1 = random(randSeed + 12.345);
         float r2 = random(randSeed + 98.765);
-
         // direction ~ cos-weighted about hitNormal
-        vec3 sampleDir = lambertNoTangent(hitNormal, vec2(r1, r2));
+        vec3 sampleDir = lambertNoTangent(hit.normal, vec2(r1, r2));
 
         // offset to avoid self-shadow
-        vec3 origin = intersectionWorld + hitNormal*1e-4;
+        vec3 origin = hit.point + hit.normal*1e-4;
 
         // Check pupil intersection
         if (!pupil.hit) {
@@ -360,15 +404,14 @@ void main() {
 
         float tLight = intersectRayPlane(origin, sampleDir, u_lightPos, light.normal);
         if(tLight > 0.0) {
-            vec3 Lpos = origin + tLight*sampleDir;
-            vec3 lightSample = sampleLight(light, Lpos, 10.0, 0.5) * 10.0;
-            float nDotL = max(dot(hitNormal, sampleDir), 0.0);
-            // accumulate
-            diffuseLight += (lightSample * nDotL);
+            vec3 lightColor = vec3(1.0f);
+            vec3 lightSample = sampleLight(light, hit, sampleDir, tLight, lightColor);
+            diffuseLight += lightSample;
         }
     }
-    // average & 1/pi factor
+
     diffuseLight /= float(SAMPLES);
+    diffuseLight *= u_lightRadiance;
     diffuseLight *= (1.0/PI);
 
     // The final base/diffuse contribution
@@ -378,22 +421,23 @@ void main() {
     // 2) SPECULAR reflection (same as your original single reflection approach)
     // ------------------------------------------------------------------------
     // Reflection direction & intersection with the light plane:
-    vec3 reflectionDir = reflect(rayWorld, hitNormal);
-    float tRefl = intersectRayPlane(intersectionWorld, reflectionDir, u_lightPos, light.normal);
+    vec3 reflectionDir = reflect(rayWorld, hit.normal);
+    float tRefl = intersectRayPlane(hit.point, reflectionDir, u_lightPos, light.normal);
     vec3 reflectionColor = vec3(0.0);
     if(tRefl > 0.0) {
-        vec3 lightHit = intersectionWorld + tRefl*reflectionDir;
-        reflectionColor = sampleLight(light, lightHit, 0.0, 0.1) * u_lightRadiance;
+        reflectionColor = sampleTextureLight(light, hit, reflectionDir, tRefl, 0.0, 0.1 );
     }
 
     // ------------------------------------------------------------------------
     // 3) Fresnel & Combine
     // ------------------------------------------------------------------------
-    float cosTheta = max(dot(-rayWorld, hitNormal), 0.0);
+    float cosTheta = max(dot(-rayWorld, hit.normal), 0.0);
     vec3 F = fresnelSchlick(cosTheta, objectF0);
 
     // final color: mix diffuse & reflection with Fresnel
     vec3 colorLinear = (1.0 - F)*diffuseColor + F*reflectionColor;
+    vec3 ambient = 0.2 * baseColor;
+    colorLinear += ambient;
     colorLinear = clamp(colorLinear, 0.0, 1.0);
 
     fragColor = vec4(colorLinear, 1.0);
