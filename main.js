@@ -154,36 +154,39 @@ loadShaderSource('fragment.glsl').then(fragmentShaderSource => {
             console.error("Error accessing camera: " + err);
         });
 
-    // Render loop: update texture from video each frame.
+
+    let animationFrameId = null; // Track the current frame
+
     function render() {
-        // Only update texture if the video is ready.
+        if (animationFrameId) {
+            cancelAnimationFrame(animationFrameId);
+        }
+        
+        animationFrameId = requestAnimationFrame(render);
+    
         if (video.readyState >= video.HAVE_CURRENT_DATA) {
             gl.bindTexture(gl.TEXTURE_2D, texture);
-            // Update texture with current video frame.
             gl.texImage2D(
                 gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA,
                 gl.UNSIGNED_BYTE, video
             );
             gl.generateMipmap(gl.TEXTURE_2D);
         }
-
+    
         gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
         gl.useProgram(program);
         gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
         gl.enableVertexAttribArray(positionAttributeLocation);
         gl.vertexAttribPointer(positionAttributeLocation, 2, gl.FLOAT, false, 0, 0);
         updateUniforms();
-
-        // Bind the video texture to texture unit 0.
+    
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, texture);
         gl.uniform1i(u_textureLocation, 0);
-
+    
         gl.clearColor(0, 0, 0, 1);
         gl.clear(gl.COLOR_BUFFER_BIT);
-        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-
-        requestAnimationFrame(render);
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
 
     // Set up event listeners for UI controls.
