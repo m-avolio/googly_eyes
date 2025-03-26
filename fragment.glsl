@@ -457,7 +457,7 @@ float fresnelThinDialectric(float cosTheta, float F0) {
 // ============================================================================
 // COSINE-WEIGHTED SAMPLING (for diffuse only)
 // ============================================================================
-vec3 lambertNoTangent(in vec3 normal, in vec2 uv) {
+vec3 lambertNoTangent(vec3 normal, vec2 uv) {
     float theta = 2.0 * PI * uv.x; 
     float y     = 2.0 * uv.y - 1.0;
 
@@ -470,19 +470,14 @@ vec3 lambertNoTangent(in vec3 normal, in vec2 uv) {
     return normalize(normal + sphereDir);
 }
 
-bool refractRay(in vec3 I, in vec3 N, in float eta, out vec3 T)
+vec3 refractRay(vec3 I, vec3 N, float eta)
 {
     float cosi  = dot(-I, N);
-    float cost2 = 1.0 - eta*eta*(1.0 - cosi*cosi);
-    if (cost2 < 0.0) {
-        // total internal reflection
-        return false;
-    }
-    float cost = sqrt(cost2);
+    float cost = sqrt(1.0 - eta*eta*(1.0 - cosi*cosi));
     // Snell's law refraction
-    T = eta * I + (eta * cosi - cost) * N;
+    vec3 T = eta * I + (eta * cosi - cost) * N;
     T = normalize(T);
-    return true;
+    return T;
 }
 // ============================================================================
 // MAIN
@@ -494,6 +489,9 @@ void main() {
     float pupilRadius    = 8.0;
     float cylinderHeight = 2.5;
     float scleraRadius   = 15.0;
+    float corneaHeight = 3.0f;
+    float corneaRadius   = 14.5;
+    float flatten = 0.4f;
 
     float  objectF0 = 0.041808;
 
@@ -503,6 +501,8 @@ void main() {
         u_focalLength,
         u_cameraPos
     );
+
+    vec3 lightColor = vec3(1.0f);
     Light light = Light(
         // vec2(3000.0, 2000.0),
         u_resolution,
@@ -520,83 +520,94 @@ void main() {
     vec4 rayWorldH = view * vec4(rayCamera, 0.0);
     vec3 rayWorld  = normalize(rayWorldH.xyz);
 
-    // Intersect with pupil & sclera
+    // Intersections
     Intersection pupil  = intersectPupil(camera.position, rayWorld, vec2(0.0), pupilRadius, cylinderHeight);
     Intersection sclera = intersectSclera(camera.position, rayWorld, scleraRadius);
+    Intersection cornea  = intersectCornea(camera.position, rayWorld, corneaRadius, corneaHeight, flatten);
 
-    Intersection hit;
     vec3 baseColor;
 
+    vec3 colorClear = vec3(0.93, 0.97, 1.0);
+    float F_clear = 0.0;
+    if (cornea.hit) {
+        // Cornea relfection
+        vec3 reflectionDir = reflect(rayWorld, cornea.normal);
+        float tRefl = intersectRayPlane(cornea.point, reflectionDir, u_lightPos, light.normal);
+        vec3 reflectionColor = 0.2 * colorClear * u_lightRadiance;
+        if(tRefl > 0.0) {
+            // reflectionColor = sampleTextureLight(light, cornea, reflectionDir, tRefl, 0.0, 0.05) * u_lightRadiance;
+            vec3 lightSampleTexture = sampleTextureLight(light, cornea, reflectionDir, tRefl, 0.0, 0.1) * 10.0 * u_lightRadiance;
+            vec3 lightSample = sampleLight(light, cornea, reflectionDir, tRefl, lightColor);
+            // Balance both types of lights
+            float bias = 0.9;
+            reflectionColor += bias * lightSampleTexture + (1.0 - bias) * lightSample;
+        }
+        float cosTheta = max(dot(-rayWorld, cornea.normal), 0.0);
+        F_clear = fresnelThinDialectric(cosTheta, objectF0);
+        colorClear = F_clear*reflectionColor + 0.2*colorClear;
+    }
+
+    Intersection hit;
     if(pupil.hit) {
-        // intersectionWorld = pupil.point;
-        // hitNormal         = pupil.normal;
         hit = pupil;
-        baseColor         = vec3(0.05f); // black pupil
+        baseColor = vec3(0.05f);
     } else if(sclera.hit) {
-        // intersectionWorld = sclera.point;
-        // hitNormal         = sclera.normal;
         hit = sclera;
-        // optional normal perturb
         hit.normal = perturb_normal(hit.normal, hit.point, 0.05, 0.05);
-        baseColor = vec3(0.9f); // white sclera
-    } else {
-        // Missed both
-        fragColor = vec4(0.5, 0.5, 0.5, 1.0);
+        baseColor = vec3(0.95f);
     }
 
     // ------------------------------------------------------------------------
-    // 1) DIFFUSE term from Lambertian sampling (for the base color)
+    // 1) DIFFUSE term from Lambertian sampling
     // ------------------------------------------------------------------------
     vec3 diffuseColor = vec3(0);
     if (pupil.hit || sclera.hit) {
-        vec3 diffuseLight = vec3(0.0);
-        for(int i = 0; i < SAMPLES; i++) {
-            vec2 randSeed = gl_FragCoord.xy + float(i)*0.1234;
-            float r1 = random(randSeed + 12.345);
-            float r2 = random(randSeed + 98.765);
-            // direction ~ cos-weighted about hitNormal
-            vec3 sampleDir = lambertNoTangent(hit.normal, vec2(r1, r2));
+        // If sclera hit and cornea hit are close in x and z, lots of light is lost
+        vec3 refracted = refractRay(rayWorld, cornea.normal, 1.5);
+        if (true) {
+            vec3 diffuseLight = vec3(0.0);
+            for(int i = 0; i < SAMPLES; i++) {
+                vec2 randSeed = gl_FragCoord.xy + float(i)*0.1234;
+                float r1 = random(randSeed + 12.345);
+                float r2 = random(randSeed + 98.765);
+                vec3 sampleDir = lambertNoTangent(hit.normal, vec2(r1, r2));
 
-            // offset to avoid self-shadow
-            vec3 origin = hit.point + hit.normal*1e-4;
+                vec3 origin = hit.point + hit.normal*EPSILON;
 
-            // Check pupil intersection
-            if (!pupil.hit) {
-                Intersection pupilShadow = intersectPupil(origin, sampleDir, vec2(0.0), pupilRadius, cylinderHeight);
+                // Shadow from pupil
+                if (!pupil.hit) {
+                    Intersection pupilShadow = intersectPupil(origin, sampleDir, vec2(0.0), pupilRadius, cylinderHeight);
 
-                if (pupilShadow.hit) {
-                    continue;
+                    if (pupilShadow.hit) {
+                        continue;
+                    }
+                }
+
+                float tLight = intersectRayPlane(origin, sampleDir, u_lightPos, light.normal);
+                if(tLight > 0.0) {
+                    vec3 lightSampleTexture = sampleTextureLight(light, hit, sampleDir, tLight, 0.0, 0.1);
+                    vec3 lightSample = sampleLight(light, hit, sampleDir, tLight, lightColor);
+                    // Balance both types of lights
+                    float bias = 0.7;
+                    diffuseLight += bias * lightSampleTexture + (1.0 - bias) * lightSample;
                 }
             }
 
-            float tLight = intersectRayPlane(origin, sampleDir, u_lightPos, light.normal);
-            if(tLight > 0.0) {
-                vec3 lightColor = vec3(1.0f);
+            diffuseLight /= float(SAMPLES);
+            diffuseLight *= u_lightRadiance;
+            diffuseLight *= (1.0/PI);
 
-                vec3 lightSample = sampleTextureLight(light, hit, sampleDir, tLight, 0.0, 0.2);
-                // vec3 lightSample = sampleLight(light, hit, sampleDir, tLight, lightColor);
-                diffuseLight += lightSample;
-            }
+            diffuseColor = baseColor * diffuseLight;
         }
-
-        diffuseLight /= float(SAMPLES);
-        diffuseLight *= u_lightRadiance;
-        diffuseLight *= (1.0/PI);
-
-        // The final base/diffuse contribution
-        diffuseColor = baseColor * diffuseLight;
     }
 
     // ------------------------------------------------------------------------
-    // 2) SPECULAR reflection (same as your original single reflection approach)
+    // 2) SPECULAR reflection
     // ------------------------------------------------------------------------
-    // Reflection direction & intersection with the light plane:
     vec3 reflectionDir = reflect(rayWorld, hit.normal);
     float tRefl = intersectRayPlane(hit.point, reflectionDir, u_lightPos, light.normal);
     vec3 reflectionColor = vec3(0.0);
     if(tRefl > 0.0) {
-
-        // reflectionColor = sampleLight(light, hit, reflectionDir, tLight, lightColor);
         reflectionColor = sampleTextureLight(light, hit, reflectionDir, tRefl, 0.0, 0.1)*u_lightRadiance;
     }
 
@@ -604,35 +615,12 @@ void main() {
     // 3) Fresnel & Combine
     // ------------------------------------------------------------------------
     float cosTheta = max(dot(-rayWorld, hit.normal), 0.0);
-    float F = fresnelSchlick(cosTheta, objectF0);
+    float F_opaque = fresnelSchlick(cosTheta, objectF0);
 
-    // final color: mix diffuse & reflection with Fresnel
-    vec3 colorLinear = (1.0 - F)*diffuseColor + F*reflectionColor;
+    vec3 colorOpaque = (1.0 - F_opaque)*diffuseColor + F_opaque*reflectionColor;
     vec3 ambient = 0.1 * baseColor;
-    colorLinear += ambient;
-    // colorLinear = clamp(colorLinear, 0.0, 1.0);
-
-
-    // Cornea Intersection
-    float corneaHeight = 3.0f;
-    float flatten = 0.4f;
-    Intersection cornea  = intersectCornea(camera.position, rayWorld, scleraRadius, corneaHeight, flatten);
-    if (cornea.hit) {
-        reflectionDir = reflect(rayWorld, cornea.normal);
-        tRefl = intersectRayPlane(cornea.point, reflectionDir, u_lightPos, light.normal);
-        reflectionColor = vec3(0.0);
-        vec3 corneaOutlineColor = vec3(0.93, 0.97, 1.0);
-        if(tRefl > 0.0) {
-            reflectionColor = sampleTextureLight(light, cornea, reflectionDir, tRefl, 0.0, 0.05) * u_lightRadiance;
-            // if (reflectionColor == vec3(1.0, 0.0, 0.0)) {
-            //     reflectionColor = corneaOutlineColor;
-            // }
-        }
-        cosTheta = max(dot(-rayWorld, hit.normal), 0.0);
-        F = fresnelThinDialectric(cosTheta, objectF0);
-        // reflectionColor = clamp(reflectionColor, 0.0, 1.0);
-        colorLinear = (1.0 - F)*colorLinear + F*reflectionColor + 0.2*corneaOutlineColor;
-    }
-
-    fragColor = vec4(colorLinear, 1.0);
+    colorOpaque += ambient;
+     
+    vec3 finalColor = F_clear*colorClear + (1.0 - F_clear)*colorOpaque;
+    fragColor = vec4(finalColor, 1.0);
 }
