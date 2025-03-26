@@ -20,7 +20,7 @@ uniform sampler2D u_lightTexture;  // Light source texture
 #define EPSILON 1e-6
 
 // Number of samples for the diffuse "Lambertian" portion
-#define SAMPLES 64
+#define SAMPLES 32
 
 // ============================================================================
 // STRUCTS
@@ -278,14 +278,7 @@ float intersectCap(vec3 rayOrigin, vec3 rayDir, float R, float cylinderHeight, f
     return tCap;
 }
 
-Intersection intersectCornea(
-    vec3 ro,            // Ray origin
-    vec3 rd,            // Ray direction
-    float radius,       // Horizontal radius of cornea
-    float cylinderH,    // Height of the cornea's cylindrical part (e.g. 2.0)
-    float flatten       // Flatten factor for the cap portion (e.g. 0.3)
-)
-{
+Intersection intersectCornea(vec3 ro, vec3 rd, float radius, float cylinderH, float flatten) {
     Intersection result;
     result.hit    = false;
     result.t      = -1.0;
@@ -536,11 +529,7 @@ void main() {
         vec3 reflectionColor = 0.2 * colorClear * u_lightRadiance;
         if(tRefl > 0.0) {
             // reflectionColor = sampleTextureLight(light, cornea, reflectionDir, tRefl, 0.0, 0.05) * u_lightRadiance;
-            vec3 lightSampleTexture = sampleTextureLight(light, cornea, reflectionDir, tRefl, 0.0, 0.1) * 10.0 * u_lightRadiance;
-            vec3 lightSample = sampleLight(light, cornea, reflectionDir, tRefl, lightColor);
-            // Balance both types of lights
-            float bias = 0.9;
-            reflectionColor += bias * lightSampleTexture + (1.0 - bias) * lightSample;
+            reflectionColor = sampleTextureLight(light, cornea, reflectionDir, tRefl, 0.0, 0.1) * 10.0 * u_lightRadiance;
         }
         float cosTheta = max(dot(-rayWorld, cornea.normal), 0.0);
         F_clear = fresnelThinDialectric(cosTheta, objectF0);
