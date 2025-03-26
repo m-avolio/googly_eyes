@@ -3,6 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <title>Fragment Shader Renderer with Video Feed Texture</title>
+    <!-- Mediapipe FaceMesh -->
+    <!-- <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script> -->
     <style>
         /* Reset defaults */
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -26,15 +29,15 @@
             <h2>Camera Settings</h2>
             <div class="control-group">
                 <label for="cameraX">Camera X:</label>
-                <input type="number" id="cameraX" value="200" step="10">
+                <input type="number" id="cameraX" value="200" step="1">
             </div>
             <div class="control-group">
                 <label for="cameraY">Camera Y:</label>
-                <input type="number" id="cameraY" value="800" step="10">
+                <input type="number" id="cameraY" value="800" step="1">
             </div>
             <div class="control-group">
                 <label for="cameraZ">Camera Z:</label>
-                <input type="number" id="cameraZ" value="500" step="10">
+                <input type="number" id="cameraZ" value="500" step="1">
             </div>
             <div class="control-group">
                 <label for="focalLength">Focal Length:</label>
