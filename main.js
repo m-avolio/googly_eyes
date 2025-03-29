@@ -1,137 +1,24 @@
-/************************************
- *  main.js – WebGL + Face Tracking (No IPD Input)
- ************************************/
-
-// =======================
-// Global Variables
-// =======================
+// Get the canvas element and set resolution to the full viewport width (square)
 var canvas = document.getElementById('glcanvas');
-canvas.width = 3000;
-canvas.height = 2000;
+canvas.width = window.innerWidth;
+canvas.height = window.innerWidth; // Ensures a square resolution
 
 var gl = canvas.getContext('webgl2');
 if (!gl) {
-    alert("Unable to initialize WebGL2. Your browser may not support it.");
+    alert("Unable to initialize WebGL. Your browser may not support it.");
 }
 
-// Face tracking variables:
-let video;       // The single video element for both WebGL texture & FaceMesh
-let faceMesh, mpCamera;
-let facePoints = [];
-// Fixed IPD in meters (no input from user):
-const ipdInMeters = 0.065;
-
-// We'll store a computed user face position & normal, used as a "camera"
-let userFacePos    = [0, 0, 500];
-let userFaceNormal = [0, 0, -1];
-
-// Mediapipe FaceMesh constants for iris
-const LEFT_IRIS_IDX = 468;
-const RIGHT_IRIS_IDX = 473;
-
-/************************************
- * FaceMesh Initialization & Callbacks
- ************************************/
-function initFaceMesh() {
-    faceMesh = new FaceMesh({
-        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
-    });
-    faceMesh.setOptions({
-        maxNumFaces: 1,
-        refineLandmarks: true,
-        minDetectionConfidence: 0.5,
-        minTrackingConfidence: 0.5
-    });
-    faceMesh.onResults(onFaceResults);
-
-    // Use the same video element for the Mediapipe Camera
-    mpCamera = new Camera(video, {
-        onFrame: async () => {
-            await faceMesh.send({ image: video });
-        },
-        width: 640,
-        height: 480,
-    });
-    mpCamera.start();
-}
-
-// Called by FaceMesh on each detection
-function onFaceResults(results) {
-    if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
-        facePoints = results.multiFaceLandmarks[0];
-    } else {
-        facePoints = [];
+// Vertex shader source code
+var vertexShaderSource = 
+    `#version 300 es
+    precision highp float;
+    in vec4 position;
+    void main() {
+        gl_Position = position;
     }
-    if (facePoints.length > 0) {
-        computeFacePositionAndNormal();
-    }
-}
-
-// Approximate 3D face position & normal from FaceMesh landmarks
-function computeFacePositionAndNormal() {
-    // 1) Compute the average (cxNorm, cyNorm) in [0..1]
-    let sumX = 0, sumY = 0;
-    for (let pt of facePoints) {
-        sumX += pt.x;
-        sumY += pt.y;
-    }
-    let cxNorm = sumX / facePoints.length;
-    let cyNorm = sumY / facePoints.length;
-
-    // 2) Iris distance in normalized coords
-    let leftIris  = facePoints[LEFT_IRIS_IDX];
-    let rightIris = facePoints[RIGHT_IRIS_IDX];
-    let measuredIrisDist = 0.06; // fallback
-    if (leftIris && rightIris) {
-        measuredIrisDist = dist2D(leftIris, rightIris);
-    }
-
-    // 3) Approx. faceZ from IPD
-    let faceZ = ipdInMeters / measuredIrisDist;
-
-    // 4) Convert the normalized center to some 3D coordinate system
-    let scaleXY = 400;  // tweak to taste
-    let x3 = (cxNorm - 0.5) * scaleXY;
-    let y3 = (cyNorm) * -scaleXY + 500;
-    userFacePos = [ x3, y3, faceZ * 1000 ];
-    // console.log(userFacePos);
-
-    // 5) Nose tip (#1) → normal
-    let noseTip = facePoints[1];
-    if (noseTip) {
-        let nx = noseTip.x - cxNorm;
-        let ny = noseTip.y - cyNorm;
-        let n3 = [ nx, -ny, 0 ];
-        normalizeInPlace(n3);
-        userFaceNormal = n3;
-    }
-}
-
-function dist2D(a, b) {
-    let dx = a.x - b.x;
-    let dy = a.y - b.y;
-    return Math.sqrt(dx*dx + dy*dy);
-}
-
-function normalizeInPlace(v) {
-    let len = Math.sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
-    if (len > 1e-7) {
-        v[0]/=len; v[1]/=len; v[2]/=len;
-    }
-}
-
-/************************************
- * Shader Setup
- ************************************/
-var vertexShaderSource = `#version 300 es
-precision highp float;
-in vec4 position;
-void main() {
-    gl_Position = position;
-}
 `;
 
-// Loads external shader text via fetch
+// Function to load shader source code from a file
 function loadShaderSource(url) {
     return fetch(url).then(response => {
         if (!response.ok) {
@@ -141,6 +28,7 @@ function loadShaderSource(url) {
     });
 }
 
+// Function to compile a shader
 function createShader(gl, type, source) {
     var shader = gl.createShader(type);
     gl.shaderSource(shader, source);
@@ -154,6 +42,7 @@ function createShader(gl, type, source) {
     return shader;
 }
 
+// Function to create a shader program
 function createProgram(gl, vertexShader, fragmentShader) {
     var program = gl.createProgram();
     gl.attachShader(program, vertexShader);
@@ -168,42 +57,166 @@ function createProgram(gl, vertexShader, fragmentShader) {
     return program;
 }
 
-/************************************
- * UI Control Values (No IPD)
- ************************************/
+// ----------------------------------------------------
+// Global variables for pupil movement
+// ----------------------------------------------------
+var pupilRadius = 8;
+var corneaRadius = 14.5;
+var pupilPos = { x: 0, y: 0 };
+var pupilVel = { x: 0, y: 0 };
+var tiltScale = 0.015;           // scale for tilt-based force
+var accelerometerScale = 0.05;   // scale for accelerometer-based force
+var friction = 0.7;              // friction factor < 1 => velocity decays
+
+// ----------------------------------------------------
+// Global variables for camera movement
+// ----------------------------------------------------
+var cameraRadius = 100;                // Fixed distance from the object
+const initCameraPos = [0, cameraRadius, 0];   // Start above the object
+var cameraPos = initCameraPos;   // Start above the object
+
+// ----------------------------------------------------
+// getControlValues now returns non-camera controls only.
+// ----------------------------------------------------
 function getControlValues() {
-    // We keep the other controls, but no IPD
     return {
-        cameraPos: [
-            parseFloat(document.getElementById('cameraX').value),
-            parseFloat(document.getElementById('cameraY').value),
-            parseFloat(document.getElementById('cameraZ').value)
-        ],
         focalLength: parseFloat(document.getElementById('focalLength').value),
-        cameraPolarizer: parseFloat(document.getElementById('cameraPolarizer').value),
         lightPos: [
             parseFloat(document.getElementById('lightX').value),
             parseFloat(document.getElementById('lightY').value),
             parseFloat(document.getElementById('lightZ').value)
         ],
         radiance: parseFloat(document.getElementById('radiance').value),
-        alpha: parseFloat(document.getElementById('alpha').value),
     };
 }
 
-/************************************
- * Main: Load Fragment Shader & Start
- ************************************/
-loadShaderSource('fragment.glsl').then(fragmentShaderSource => {
-    let vertexShader   = createShader(gl, gl.VERTEX_SHADER,   vertexShaderSource);
-    let fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fragmentShaderSource);
-    let program        = createProgram(gl, vertexShader, fragmentShader);
-    if (!program) return;
+// ----------------------------------------------------
+// Device orientation handler: update both pupil and camera positions.
+// ----------------------------------------------------
 
-    // Full-screen quad
-    let positionBuffer = gl.createBuffer();
+function createRotationX(theta) {
+    var cosT = Math.cos(theta);
+    var sinT = Math.sin(theta);
+    return [
+        [1,     0,      0],
+        [0,  cosT,  -sinT],
+        [0,  sinT,   cosT]
+    ];
+}
+
+function createRotationZ(theta) {
+    var cosT = Math.cos(theta);
+    var sinT = Math.sin(theta);
+    return [
+        [cosT, -sinT,  0],
+        [sinT,  cosT,  0],
+        [0,  0,        1]
+    ];
+}
+
+function multiplyMatrixVector(matrix, vector) {
+    var result = [0, 0, 0];
+    for (var i = 0; i < 3; i++) {
+        result[i] = matrix[i][0] * vector[0] +
+                    matrix[i][1] * vector[1] +
+                    matrix[i][2] * vector[2];
+    }
+    return result;
+}
+
+function handleDeviceOrientation(e) {
+    var ay = e.gamma * tiltScale;
+    var ax = -e.beta  * tiltScale;
+    pupilVel.x += ax;
+    pupilVel.y += ay;
+    pupilVel.x *= friction;
+    pupilVel.y *= friction;
+    pupilPos.x += pupilVel.x;
+    pupilPos.y += pupilVel.y;
+    var maxMove = corneaRadius - pupilRadius;
+    var dist = Math.sqrt(pupilPos.x * pupilPos.x + pupilPos.y * pupilPos.y);
+    if (dist > maxMove) {
+        var ratio = maxMove / dist;
+        pupilPos.x *= ratio;
+        pupilPos.y *= ratio;
+    }
+    
+    var phi   = e.gamma * Math.PI / 180; // horizontal angle
+    var theta = e.beta  * Math.PI / 180; // vertical angle
+    var maxPhi = Math.PI;
+    phi = Math.max(-maxPhi, Math.min(maxPhi, phi));
+    var maxTheta = Math.PI / 2.5;
+    theta = Math.max(-maxTheta, Math.min(maxTheta, theta));
+
+
+    var rotX = createRotationX(-phi);
+    var rotZ = createRotationZ(-theta);
+
+    cameraPos = multiplyMatrixVector(rotX, initCameraPos);
+    cameraPos = multiplyMatrixVector(rotZ, cameraPos);
+    console.log(cameraPos);
+}
+
+// For mobile devices with tilt:
+var isMobile = /Android|iPhone|iPad|iPod|BlackBerry|Windows Phone/i.test(navigator.userAgent);
+if (isMobile && window.DeviceOrientationEvent) {
+    if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+        var button = document.createElement('button');
+        button.textContent = 'Enable tilt control';
+        button.style.position = 'absolute';
+        button.style.zIndex = '9999';
+        button.style.top = '10px';
+        button.style.left = '10px';
+        document.body.appendChild(button);
+        button.addEventListener('click', function() {
+            DeviceOrientationEvent.requestPermission().then(function(permissionState) {
+                if (permissionState === 'granted') {
+                    window.addEventListener('deviceorientation', handleDeviceOrientation);
+                    document.body.removeChild(button);
+                } else {
+                    alert('Permission not granted for DeviceOrientation');
+                }
+            }).catch(function(err) {
+                console.error(err);
+            });
+        });
+    } else {
+        window.addEventListener('deviceorientation', handleDeviceOrientation);
+    }
+} else {
+    // For desktop: Use mouse movement to simulate tilt.
+    canvas.addEventListener('mousemove', function(e) {
+        var rect = canvas.getBoundingClientRect();
+        var mouseX = e.clientX - rect.left;
+        var mouseY = e.clientY - rect.top;
+
+        // ----- Update pupil position (existing mouse logic) -----
+        var ndcX = (mouseX / canvas.width ) * 2.0 - 1.0;
+        var ndcY = (mouseY / canvas.height) * 2.0 - 1.0;
+        var maxMove = corneaRadius - pupilRadius;
+        var rawX = ndcX * maxMove;
+        var rawY = ndcY * maxMove;
+        var dist = Math.sqrt(rawX * rawX + rawY * rawY);
+        if (dist > maxMove) {
+            rawX = (rawX / dist) * maxMove;
+            rawY = (rawY / dist) * maxMove;
+        }
+        pupilPos.x = rawX;
+        pupilPos.y = rawY;
+    });
+}
+
+// Load the fragment shader and set up the rendering
+loadShaderSource('fragment.glsl').then(fragmentShaderSource => {
+    var vertexShader = createShader(gl, gl.VERTEX_SHADER, vertexShaderSource);
+    var fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fragmentShaderSource);
+    var program = createProgram(gl, vertexShader, fragmentShader);
+    if (!program) { return; }
+
+    // Set up position buffer for a full-screen quad
+    var positionBuffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
-    let positions = new Float32Array([
+    var positions = new Float32Array([
         -1.0, -1.0,
          1.0, -1.0,
         -1.0,  1.0,
@@ -211,89 +224,77 @@ loadShaderSource('fragment.glsl').then(fragmentShaderSource => {
     ]);
     gl.bufferData(gl.ARRAY_BUFFER, positions, gl.STATIC_DRAW);
 
-    // Attribute & Uniform locations
-    let positionAttrLoc   = gl.getAttribLocation(program, 'position');
-    let u_resolutionLoc   = gl.getUniformLocation(program, 'u_resolution');
-    let u_cameraPosLoc    = gl.getUniformLocation(program, 'u_cameraPos');
-    let u_focalLenLoc     = gl.getUniformLocation(program, 'u_focalLength');
-    let u_camPolarLoc     = gl.getUniformLocation(program, 'u_cameraPolarizer');
-    let u_lightPosLoc     = gl.getUniformLocation(program, 'u_lightPos');
-    let u_radianceLoc     = gl.getUniformLocation(program, 'u_lightRadiance');
-    let u_alphaLoc        = gl.getUniformLocation(program, 'u_alpha');
-    let u_textureLoc      = gl.getUniformLocation(program, 'u_texture');
+    // Get attribute/uniform locations
+    var positionAttributeLocation = gl.getAttribLocation(program, 'position');
+    var u_resolutionLocation      = gl.getUniformLocation(program, 'u_resolution');
+    var u_texResolutionLocation   = gl.getUniformLocation(program, 'u_texResolution');
+    var u_cameraPosLocation       = gl.getUniformLocation(program, 'u_cameraPos');
+    var u_focalLengthLocation     = gl.getUniformLocation(program, 'u_focalLength');
+    var u_lightPosLocation        = gl.getUniformLocation(program, 'u_lightPos');
+    var u_radianceLocation        = gl.getUniformLocation(program, 'u_lightRadiance');
+    var u_textureLocation         = gl.getUniformLocation(program, 'u_texture');
+    var u_pupilPosLocation        = gl.getUniformLocation(program, 'u_pupilPos');
+    var u_pupilRadiusLocation     = gl.getUniformLocation(program, 'u_pupilRadius');
+    var u_corneaRadiusLocation    = gl.getUniformLocation(program, 'u_corneaRadius');
 
-    // Add a uniform for camera/face normal
-    let u_cameraNormalLoc = gl.getUniformLocation(program, 'u_cameraNormal');
+    gl.enableVertexAttribArray(positionAttributeLocation);
+    gl.vertexAttribPointer(positionAttributeLocation, 2, gl.FLOAT, false, 0, 0);
 
-    // Enable vertex attribute
-    gl.enableVertexAttribArray(positionAttrLoc);
-    gl.vertexAttribPointer(positionAttrLoc, 2, gl.FLOAT, false, 0, 0);
-
-    // This function updates our uniforms each frame
+    // Update uniforms – pass in both camera and pupil data.
     function updateUniforms() {
-        let values = getControlValues();
-        gl.uniform2f(u_resolutionLoc, canvas.width, canvas.height);
+        var values = getControlValues();
+        gl.uniform2f(u_resolutionLocation, canvas.width, canvas.height);
+        gl.uniform3fv(u_cameraPosLocation, cameraPos);
+        gl.uniform1f(u_focalLengthLocation, values.focalLength);
+        gl.uniform3fv(u_lightPosLocation, values.lightPos);
+        gl.uniform1f(u_radianceLocation, values.radiance);
 
-        // Overwrite cameraPos with face center from FaceMesh
-        // gl.uniform3fv(u_cameraPosLoc, userFacePos);
-        gl.uniform3fv(u_cameraPosLoc, values.cameraPos);
+        gl.uniform2f(u_pupilPosLocation, pupilPos.x, pupilPos.y);
+        gl.uniform1f(u_pupilRadiusLocation, pupilRadius);
+        gl.uniform1f(u_corneaRadiusLocation, corneaRadius);
 
-        // The rest come from UI
-        gl.uniform1f(u_focalLenLoc, values.focalLength);
-        gl.uniform1f(u_camPolarLoc, values.cameraPolarizer);
-        gl.uniform3fv(u_lightPosLoc, values.lightPos);
-        gl.uniform1f(u_radianceLoc, values.radiance);
-        gl.uniform1f(u_alphaLoc, values.alpha);
-
-        // Send face normal
-        gl.uniform3fv(u_cameraNormalLoc, userFaceNormal);
+        var texWidth = video.videoWidth || canvas.width;
+        var texHeight = video.videoHeight || canvas.height;
+        gl.uniform2f(u_texResolutionLocation, texWidth, texHeight);
     }
 
-    // =========================================
-    // Create the texture for the camera feed
-    // =========================================
-    let texture = gl.createTexture();
+    // Create a texture object for the video feed.
+    var texture = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, texture);
-    // Temporary single-pixel
+    // Initialize with a temporary pixel.
     gl.texImage2D(
         gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0,
-        gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([255,255,255,255])
+        gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([255, 255, 255, 255])
     );
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
 
-    // Now create the video element (global 'video' used in initFaceMesh)
-    video = document.createElement('video');
-    video.autoplay    = true;
+    // Create a video element to capture the camera feed.
+    var video = document.createElement('video');
+    video.autoplay = true;
     video.playsInline = true;
-    video.muted       = true;
+    video.muted = true;
 
-    // Request camera stream
+    // Request the camera stream.
     navigator.mediaDevices.getUserMedia({ video: true })
-    .then(stream => {
-        video.srcObject = stream;
-        video.play();
-        // Once video is playing, set up FaceMesh
-        initFaceMesh();
-    })
-    .catch(err => {
-        // The AbortError can appear if permission is denied or the camera is not available
-        console.error("Error accessing camera: ", err);
-    });
+        .then(stream => {
+            video.srcObject = stream;
+            video.play();
+        })
+        .catch(err => {
+            console.error("Error accessing camera: " + err);
+        });
 
-    // ===================
-    // Render Loop
-    // ===================
     let animationFrameId = null;
+
     function render() {
         if (animationFrameId) {
             cancelAnimationFrame(animationFrameId);
         }
         animationFrameId = requestAnimationFrame(render);
 
-        // Update the texture from the video feed
         if (video.readyState >= video.HAVE_CURRENT_DATA) {
             gl.bindTexture(gl.TEXTURE_2D, texture);
             gl.texImage2D(
@@ -305,50 +306,32 @@ loadShaderSource('fragment.glsl').then(fragmentShaderSource => {
 
         gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
         gl.useProgram(program);
-
         gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
-        gl.enableVertexAttribArray(positionAttrLoc);
-        gl.vertexAttribPointer(positionAttrLoc, 2, gl.FLOAT, false, 0, 0);
+        gl.enableVertexAttribArray(positionAttributeLocation);
+        gl.vertexAttribPointer(positionAttributeLocation, 2, gl.FLOAT, false, 0, 0);
 
-        // Update uniforms
         updateUniforms();
 
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, texture);
-        gl.uniform1i(u_textureLoc, 0);
+        gl.uniform1i(u_textureLocation, 0);
 
         gl.clearColor(0, 0, 0, 1);
         gl.clear(gl.COLOR_BUFFER_BIT);
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     }
 
-    // Listen to UI changes
-    let controls = [
-      'cameraX','cameraY','cameraZ','focalLength','cameraPolarizer',
-      'lightX','lightY','lightZ','radiance','alpha'
-    ];
-    controls.forEach(controlId => {
-        let ctrl = document.getElementById(controlId);
-        if (!ctrl) return;
-        ctrl.addEventListener('input', render);
+    // UI controls for the remaining values
+    var controls = ['focalLength', 'lightX', 'lightY', 'lightZ', 'radiance'];
+    controls.forEach(function(controlId) {
+        var control = document.getElementById(controlId);
+        control.addEventListener('input', function() {
+            render();
+        });
     });
 
-    // Kick off the rendering
+    // Initial render
     render();
-
-    // Download button
-    var downloadButton = document.getElementById('downloadButton');
-    downloadButton.addEventListener('click', () => {
-        render();
-        var dataURL = canvas.toDataURL('image/png');
-        var link = document.createElement('a');
-        link.href = dataURL;
-        link.download = 'rendered_image.png';
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-    });
-})
-.catch(error => {
-    console.error("Error fetching fragment.glsl or initializing shaders: ", error);
+}).catch(error => {
+    console.error(error);
 });

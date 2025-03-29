@@ -12,6 +12,10 @@ uniform vec2  u_resolution;
 uniform float u_lightRadiance;
 uniform float u_alpha;
 uniform sampler2D u_lightTexture;  // Light source texture
+uniform vec2  u_texResolution;
+uniform vec2  u_pupilPos;
+uniform float u_pupilRadius;
+uniform float u_corneaRadius;
 
 // ============================================================================
 // CONSTANTS & DEFINES
@@ -114,13 +118,8 @@ mat4 viewMatrix(Camera camera) {
     vec3 zBasis = normalize(camera.position);
     vec3 xBasis;
     vec3 yBasis;
-    if (true) {
-        xBasis = vec3(1, 0, 0);
-        yBasis = cross(zBasis, xBasis);
-    } else {
-        xBasis = normalize(cross(vec3(0,1,0), zBasis));
-        yBasis = cross(zBasis, xBasis);
-    }
+    xBasis = normalize(cross(vec3(1, 0, 0), zBasis));
+    yBasis = cross(zBasis, xBasis);
 
     return mat4(
         vec4(xBasis, 0.0),
@@ -130,19 +129,28 @@ mat4 viewMatrix(Camera camera) {
     );
 }
 
-mat4 lookAt(vec3 camera, vec3 target, vec3 up) {
-    vec3 f = normalize(target - camera);      // forward
-    vec3 s = normalize(cross(f, up));        // right
-    vec3 u = cross(s, f);                    // recalculated up
-
+mat4 cameraToWorld(Camera camera, vec3 target) {
+    // Fixed x-axis in world space.
+    vec3 fixedX = vec3(1.0, 0.0, 0.0);
+    
+    // Compute the forward direction from the target to the camera.
+    // This guarantees the camera orbits around the target.
+    vec3 forward = normalize(camera.position - target);
+    
+    // Project forward onto the YZ plane relative to fixedX.
+    forward = normalize(forward - dot(forward, fixedX) * fixedX);
+    
+    // Compute the up vector from forward and fixedX.
+    vec3 up = cross(forward, fixedX);
+    
+    // Build the camera-to-world matrix with translation relative to the target.
     return mat4(
-        vec4(s, 0.0),
-        vec4(u, 0.0),
-        vec4(-f, 0.0),
-        vec4(-dot(s, camera), -dot(u, camera), dot(f, camera), 1.0)
+        vec4(fixedX, 0.0),
+        vec4(up, 0.0),
+        vec4(forward, 0.0),
+        vec4(camera.position, 1.0)
     );
 }
-
 // ============================================================================
 // INTERSECTIONS
 // ============================================================================
@@ -273,8 +281,7 @@ float intersectCap(vec3 rayOrigin, vec3 rayDir, float R, float cylinderHeight, f
     if(tCap < 0.0 && t2 > EPSILON) {
         vec3 pos = rayOrigin + t2 * rayDir;
         if(pos.y >= cylinderHeight)
-            tCap = t2;
-    }
+            tCap = t2;    }
     return tCap;
 }
 
@@ -366,8 +373,6 @@ Intersection intersectCornea(vec3 ro, vec3 rd, float radius, float cylinderH, fl
 // ============================================================================
 // LIGHT SAMPLING
 // ============================================================================
-
-
 vec3 sampleLight(Light light, Intersection hit, vec3 sampleDir, float tLight, vec3 lightColor) {
     vec3 lightIntersection = hit.point + tLight*sampleDir;
     // For a rectangular area light in plane (light.normal, light.position)
@@ -479,32 +484,30 @@ out vec4 fragColor;
 
 void main() {
     // Eye geometry
-    float pupilRadius    = 8.0;
+    float pupilRadius    = u_pupilRadius;
     float cylinderHeight = 2.5;
-    float scleraRadius   = 15.0;
+    float scleraRadius   = u_corneaRadius + 0.5;
     float corneaHeight = 3.0f;
-    float corneaRadius   = 14.5;
-    float flatten = 0.4f;
+    float corneaRadius   = u_corneaRadius;
+    float flatten = 0.6f;
 
     float  objectF0 = 0.041808;
 
     // Camera & Light
     Camera camera = Camera(
-        vec2(36.0, 24.0),
+        vec2(24.0, 24.0),
         u_focalLength,
         u_cameraPos
     );
 
     vec3 lightColor = vec3(1.0f);
     Light light = Light(
-        // vec2(3000.0, 2000.0),
-        u_resolution,
+        10.0 * u_texResolution,
         u_lightPos,
         normalize(vec3(0.0, -1.0, 0.0))
     );
 
     mat4 view = viewMatrix(camera);
-    // mat4 view = lookAt(camera.position, vec3(0), vec3(EPSILON, 1, EPSILON));
 
     // Build ray
     vec2 uv = gl_FragCoord.xy / u_resolution.xy;
@@ -514,7 +517,7 @@ void main() {
     vec3 rayWorld  = normalize(rayWorldH.xyz);
 
     // Intersections
-    Intersection pupil  = intersectPupil(camera.position, rayWorld, vec2(0.0), pupilRadius, cylinderHeight);
+    Intersection pupil  = intersectPupil(camera.position, rayWorld, u_pupilPos, pupilRadius, cylinderHeight);
     Intersection sclera = intersectSclera(camera.position, rayWorld, scleraRadius);
     Intersection cornea  = intersectCornea(camera.position, rayWorld, corneaRadius, corneaHeight, flatten);
 
@@ -526,7 +529,7 @@ void main() {
         // Cornea relfection
         vec3 reflectionDir = reflect(rayWorld, cornea.normal);
         float tRefl = intersectRayPlane(cornea.point, reflectionDir, u_lightPos, light.normal);
-        vec3 reflectionColor = 0.2 * colorClear * u_lightRadiance;
+        vec3 reflectionColor = 0.2*colorClear;
         if(tRefl > 0.0) {
             // reflectionColor = sampleTextureLight(light, cornea, reflectionDir, tRefl, 0.0, 0.05) * u_lightRadiance;
             reflectionColor = sampleTextureLight(light, cornea, reflectionDir, tRefl, 0.0, 0.1) * 10.0 * u_lightRadiance;
@@ -565,7 +568,7 @@ void main() {
 
                 // Shadow from pupil
                 if (!pupil.hit) {
-                    Intersection pupilShadow = intersectPupil(origin, sampleDir, vec2(0.0), pupilRadius, cylinderHeight);
+                    Intersection pupilShadow = intersectPupil(origin, sampleDir, u_pupilPos, pupilRadius, cylinderHeight);
 
                     if (pupilShadow.hit) {
                         continue;
@@ -607,7 +610,7 @@ void main() {
     float F_opaque = fresnelSchlick(cosTheta, objectF0);
 
     vec3 colorOpaque = (1.0 - F_opaque)*diffuseColor + F_opaque*reflectionColor;
-    vec3 ambient = 0.1 * baseColor;
+    vec3 ambient = 0.05 * baseColor;
     colorOpaque += ambient;
      
     vec3 finalColor = F_clear*colorClear + (1.0 - F_clear)*colorOpaque;
